@@ -22,11 +22,13 @@ import org.osgi.framework.Bundle;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.BundleEvent;
 import org.osgi.framework.BundleListener;
+import org.osgi.framework.ServiceRegistration;
+import org.pentaho.requirejs.IPlatformPluginRequireJsConfigurations;
 import org.pentaho.requirejs.IRequireJsPackage;
 import org.pentaho.requirejs.impl.RequireJsConfigManager;
 import org.pentaho.requirejs.impl.types.MetaInfPackageJson;
 import org.pentaho.requirejs.impl.types.MetaInfRequireJson;
-import org.pentaho.requirejs.impl.types.RequireJsConfiguration;
+import org.pentaho.requirejs.impl.types.BundledPlatformPluginRequireJsConfigurations;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -43,27 +45,28 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Listens to and processes bundles that include some sort of RequireJS configuration information.
- * <p>
+ *
  * For bundles with META-INF/js/package.json or META-INF/js/require.json files, parses the json file
  * and registers a corresponding {@link IRequireJsPackage} service implementation, to be dealt by {@link RequireJsPackageServiceTracker}.
  * The service reference is maintained so it can be unregistered when the bundle stops.
- * <p>
+ *
  * For bundles with META-INF/js/externalResources.json file (and optionally an accompanying META-INF/js/staticResources.json file),
- * a {@link RequireJsConfiguration} instance is created, to be returned by {@link #getScripts()} until the
+ * a {@link IPlatformPluginRequireJsConfigurations} instance is created, to be returned by {@link #getScripts()} until the
  * corresponding bundle is stopped.
  */
 public class RequireJsBundleListener implements BundleListener {
   static final String PACKAGE_JSON_PATH = "META-INF/js/package.json";
   static final String REQUIRE_JSON_PATH = "META-INF/js/require.json";
-  static final String EXTERNAL_RESOURCES_JSON_PATH = "META-INF/js/externalResources.json";
-  static final String STATIC_RESOURCES_JSON_PATH = "META-INF/js/staticResources.json";
+
+  public static final String EXTERNAL_RESOURCES_JSON_PATH = "META-INF/js/externalResources.json";
+  public static final String STATIC_RESOURCES_JSON_PATH = "META-INF/js/staticResources.json";
 
   private BundleContext bundleContext;
 
   private RequireJsConfigManager requireJsConfigManager;
 
-  private Map<Long, IRequireJsPackage> configMap;
-  private Map<Long, RequireJsConfiguration> requireConfigMap;
+  private Map<Long, ServiceRegistration<?>> serviceRegistrationMap;
+  private Map<Long, IPlatformPluginRequireJsConfigurations> requireConfigMap;
 
   private JSONParser parser;
 
@@ -76,10 +79,10 @@ public class RequireJsBundleListener implements BundleListener {
   }
 
   public void init() {
-    this.configMap = new ConcurrentHashMap<>();
-    this.requireConfigMap = new ConcurrentHashMap<>();
-
     this.parser = new JSONParser();
+
+    this.serviceRegistrationMap = new ConcurrentHashMap<>();
+    this.requireConfigMap = new ConcurrentHashMap<>();
 
     this.bundleContext.addBundleListener( this );
 
@@ -89,34 +92,36 @@ public class RequireJsBundleListener implements BundleListener {
   }
 
   public void destroy() {
-    this.configMap = null;
+    this.serviceRegistrationMap = null;
     this.requireConfigMap = null;
 
-    bundleContext.removeBundleListener( this );
+    this.bundleContext.removeBundleListener( this );
   }
 
-  public Collection<RequireJsConfiguration> getScripts() {
+  public Collection<IPlatformPluginRequireJsConfigurations> getScripts() {
     return Collections.unmodifiableCollection( this.requireConfigMap.values() );
   }
 
   @Override
   public void bundleChanged( BundleEvent bundleEvent ) {
-    final Bundle bundle = bundleEvent.getBundle();
+    if ( this.isListenerActive() ) {
+      final Bundle bundle = bundleEvent.getBundle();
 
-    final int bundleEventType = bundleEvent.getType();
+      final int bundleEventType = bundleEvent.getType();
 
-    boolean shouldInvalidate = false;
+      boolean shouldInvalidate = false;
 
-    if ( bundleEventType == BundleEvent.STARTED ) {
-      shouldInvalidate = addBundle( bundle );
-    } else if ( bundleEventType == BundleEvent.UNINSTALLED
-        || bundleEventType == BundleEvent.UNRESOLVED
-        || bundleEventType == BundleEvent.STOPPED ) {
-      shouldInvalidate = removeBundle( bundle );
-    }
+      if ( bundleEventType == BundleEvent.STARTED ) {
+        shouldInvalidate = addBundle( bundle );
+      } else if ( bundleEventType == BundleEvent.UNINSTALLED
+          || bundleEventType == BundleEvent.UNRESOLVED
+          || bundleEventType == BundleEvent.STOPPED ) {
+        shouldInvalidate = removeBundle( bundle );
+      }
 
-    if ( shouldInvalidate ) {
-      this.requireJsConfigManager.invalidateCachedConfigurations();
+      if ( shouldInvalidate && this.isListenerActive() ) {
+        this.requireJsConfigManager.invalidateCachedConfigurations();
+      }
     }
   }
 
@@ -129,12 +134,16 @@ public class RequireJsBundleListener implements BundleListener {
   }
 
   private boolean removeBundleInternal( Bundle bundle ) {
-    IRequireJsPackage bundleConfig = this.configMap.remove( bundle.getBundleId() );
-    if ( bundleConfig != null ) {
-      bundleConfig.unregister();
+    ServiceRegistration<?> serviceRegistration = this.serviceRegistrationMap.remove( bundle.getBundleId() );
+    if ( serviceRegistration != null ) {
+      try {
+        serviceRegistration.unregister();
+      } catch ( RuntimeException ignored ) {
+        // service might be already unregistered automatically by the bundle lifecycle manager
+      }
     }
 
-    RequireJsConfiguration requireJsConfiguration = this.requireConfigMap.remove( bundle.getBundleId() );
+    IPlatformPluginRequireJsConfigurations requireJsConfiguration = this.requireConfigMap.remove( bundle.getBundleId() );
 
     return requireJsConfiguration != null;
   }
@@ -144,14 +153,16 @@ public class RequireJsBundleListener implements BundleListener {
    * @return true only if any bundles with META-INF/js/externalResources.json file was added / updated.
    */
   boolean addBundle( Bundle bundle ) {
-    if ( bundle.getState() != Bundle.ACTIVE ) {
-      return false;
-    }
-
-    // clear any previous configurations (for bundle updates)
-    boolean shouldInvalidate = removeBundleInternal( bundle );
+    boolean shouldInvalidate;
 
     try {
+      if ( bundle.getState() != Bundle.ACTIVE ) {
+        return false;
+      }
+
+      // clear any previous configurations (for bundle updates)
+      shouldInvalidate = removeBundleInternal( bundle );
+
       URL packageJsonUrl = bundle.getResource( PACKAGE_JSON_PATH );
       URL configFileUrl = bundle.getResource( REQUIRE_JSON_PATH );
 
@@ -163,20 +174,20 @@ public class RequireJsBundleListener implements BundleListener {
         Map<String, Object> requireJsonObject = this.loadJsonObject( configFileUrl );
 
         if ( requireJsonObject != null ) {
-          IRequireJsPackage packageInfo = new MetaInfRequireJson( bundle.getBundleContext(), requireJsonObject );
-          packageInfo.register();
+          IRequireJsPackage packageInfo = new MetaInfRequireJson( requireJsonObject );
 
-          this.configMap.put( bundle.getBundleId(), packageInfo );
+          ServiceRegistration<?> serviceRegistration = bundle.getBundleContext().registerService( IRequireJsPackage.class.getName(), packageInfo, null );
+          this.serviceRegistrationMap.put( bundle.getBundleId(), serviceRegistration );
         }
       } else if ( packageJsonUrl != null ) {
         // next: fixed META-INF/js/package.json
         Map<String, Object> packageJsonObject = this.loadJsonObject( packageJsonUrl );
 
         if ( packageJsonObject != null ) {
-          IRequireJsPackage packageInfo = new MetaInfPackageJson( bundle.getBundleContext(), packageJsonObject );
-          packageInfo.register();
+          IRequireJsPackage packageInfo = new MetaInfPackageJson( packageJsonObject );
 
-          this.configMap.put( bundle.getBundleId(), packageInfo );
+          ServiceRegistration<?> serviceRegistration = bundle.getBundleContext().registerService( IRequireJsPackage.class.getName(), packageInfo, null );
+          this.serviceRegistrationMap.put( bundle.getBundleId(), serviceRegistration );
         }
       }
 
@@ -186,34 +197,10 @@ public class RequireJsBundleListener implements BundleListener {
         Map<String, Object> staticResourceJsonObject = this.loadJsonObject( staticResourcesUrl );
 
         if ( externalResourceJsonObject != null ) {
-          List<String> requireJsList = (List<String>) externalResourceJsonObject.get( "requirejs" );
+          List<String> requireJsList = getRequireJsList( externalResourceJsonObject, staticResourceJsonObject );
 
           if ( requireJsList != null ) {
-            if ( staticResourceJsonObject != null ) {
-              List<String> translatedList = new ArrayList<>( requireJsList.size() );
-
-              for ( String element : requireJsList ) {
-                boolean found = false;
-                for ( Object key : staticResourceJsonObject.keySet() ) {
-                  String strKey = key.toString();
-
-                  if ( element.startsWith( strKey ) ) {
-                    String value = staticResourceJsonObject.get( key ).toString();
-                    translatedList.add( value + element.substring( strKey.length() ) );
-                    found = true;
-                    break;
-                  }
-                }
-
-                if ( !found ) {
-                  translatedList.add( element );
-                }
-              }
-
-              requireJsList = translatedList;
-            }
-
-            this.requireConfigMap.put( bundle.getBundleId(), new RequireJsConfiguration( bundle, requireJsList ) );
+            this.requireConfigMap.put( bundle.getBundleId(), new BundledPlatformPluginRequireJsConfigurations( bundle, requireJsList ) );
             shouldInvalidate = true;
           }
         }
@@ -223,6 +210,42 @@ public class RequireJsBundleListener implements BundleListener {
     }
 
     return shouldInvalidate;
+  }
+
+  private List<String> getRequireJsList( Map<String, Object> externalResourceJsonObject, Map<String, Object> staticResourceJsonObject ) {
+    List<String> requireJsList = (List<String>) externalResourceJsonObject.get( "requirejs" );
+
+    if ( requireJsList != null ) {
+      if ( staticResourceJsonObject != null ) {
+        List<String> translatedList = new ArrayList<>( requireJsList.size() );
+
+        for ( String element : requireJsList ) {
+          boolean found = false;
+          for ( Object key : staticResourceJsonObject.keySet() ) {
+            String strKey = key.toString();
+
+            if ( element.startsWith( strKey ) ) {
+              String value = staticResourceJsonObject.get( key ).toString();
+              translatedList.add( value + element.substring( strKey.length() ) );
+              found = true;
+              break;
+            }
+          }
+
+          if ( !found ) {
+            translatedList.add( element );
+          }
+        }
+
+        requireJsList = translatedList;
+      }
+    }
+
+    return requireJsList;
+  }
+
+  private boolean isListenerActive() {
+    return this.requireConfigMap != null && this.serviceRegistrationMap != null;
   }
 
   private Map<String, Object> loadJsonObject( URL url ) throws IOException, ParseException {

@@ -16,8 +16,6 @@
  */
 package org.pentaho.requirejs.impl.types;
 
-import org.osgi.framework.BundleContext;
-import org.osgi.framework.ServiceRegistration;
 import org.pentaho.requirejs.IRequireJsPackage;
 
 import java.net.URL;
@@ -40,10 +38,6 @@ import java.util.regex.Pattern;
  * configuration is applied globally ({@link IRequireJsPackage#preferGlobal} returns true).
  */
 public class MetaInfRequireJson implements IRequireJsPackage {
-  private final BundleContext bundleContext;
-
-  private ServiceRegistration<?> serviceReference;
-
   private final Map<String, Object> requireJsonObject;
 
   private final Map<String, String> modules;
@@ -63,9 +57,7 @@ public class MetaInfRequireJson implements IRequireJsPackage {
   private boolean isAmdPackage;
   private String exports;
 
-  public MetaInfRequireJson( BundleContext bundleContext, Map<String, Object> requireJsonObject ) {
-    this.bundleContext = bundleContext;
-
+  public MetaInfRequireJson( Map<String, Object> requireJsonObject ) {
     this.requireJsonObject = requireJsonObject;
 
     this.modules = new HashMap<>();
@@ -78,6 +70,8 @@ public class MetaInfRequireJson implements IRequireJsPackage {
     this.localMap = new HashMap<>();
 
     this.shim = new HashMap<>();
+
+    this.isAmdPackage = true;
 
     this.init();
   }
@@ -112,6 +106,11 @@ public class MetaInfRequireJson implements IRequireJsPackage {
     this.packages.put( moduleId, main );
   }
 
+  private void removeModule( String moduleId ) {
+    this.modules.remove( moduleId );
+    this.packages.remove( moduleId );
+  }
+
   @Override
   public Map<String, String> getModules() {
     return Collections.unmodifiableMap( this.modules );
@@ -124,6 +123,10 @@ public class MetaInfRequireJson implements IRequireJsPackage {
 
   private void addDependency( String packageName, String version ) {
     dependencies.put( packageName, version );
+  }
+
+  private void removeDependency( String packageName ) {
+    dependencies.remove( packageName );
   }
 
   @Override
@@ -144,6 +147,10 @@ public class MetaInfRequireJson implements IRequireJsPackage {
     this.config.put( moduleId, configuration );
   }
 
+  private void removeConfig( String moduleId ) {
+    this.config.remove( moduleId );
+  }
+
   @Override
   public Map<String, Map<String, ?>> getConfig() {
     return Collections.unmodifiableMap( this.config );
@@ -153,6 +160,20 @@ public class MetaInfRequireJson implements IRequireJsPackage {
     this.localMap.computeIfAbsent( where, m -> new HashMap<>() ).put( originalModuleId, mappedModuleId );
   }
 
+  private void removeMap( String where ) {
+    this.removeMap( where, null );
+  }
+
+  private void removeMap( String where, String originalModuleId ) {
+    if ( this.localMap.containsKey( where ) ) {
+      if ( originalModuleId != null ) {
+        this.localMap.get( where ).remove( originalModuleId );
+      } else {
+        this.localMap.remove( where );
+      }
+    }
+  }
+
   @Override
   public Map<String, Map<String, String>> getMap() {
     return Collections.unmodifiableMap( this.localMap );
@@ -160,6 +181,10 @@ public class MetaInfRequireJson implements IRequireJsPackage {
 
   private void addShim( String moduleId, Map<String, ?> configuration ) {
     this.shim.put( moduleId, configuration );
+  }
+
+  private void removeShim( String moduleId ) {
+    this.shim.remove( moduleId );
   }
 
   @Override
@@ -277,21 +302,20 @@ public class MetaInfRequireJson implements IRequireJsPackage {
       packages.forEach( packageDefinition -> {
         if ( packageDefinition instanceof String ) {
           String packageName = getUnversionedModuleId( moduleIdTranslator, (String) packageDefinition );
+          String path = this.modules.getOrDefault( packageName, "/" + packageName );
 
-          this.addModule( packageName, null, "main" );
+          path = getUnversionedPath( basePaths, path );
+
+          this.addModule( packageName, path, "main" );
         } else if ( packageDefinition instanceof HashMap ) {
           final HashMap<String, String> packageObj = (HashMap<String, String>) packageDefinition;
 
           if ( packageObj.containsKey( "name" ) ) {
             String packageName = getUnversionedModuleId( moduleIdTranslator, packageObj.get( "name" ) );
-            String path = packageObj.get( "location" );
+            String path = packageObj.getOrDefault( "location", "/" + ( !packageName.equals( name ) ? packageName : "" ) );
             String mainScript = packageObj.getOrDefault( "main", "main" );
 
-            if ( path != null ) {
-              path = getUnversionedPath( basePaths, path );
-            } else {
-              path = this.modules.get( packageName );
-            }
+            path = getUnversionedPath( basePaths, path );
 
             this.addModule( packageName, path, mainScript );
           }
@@ -317,7 +341,7 @@ public class MetaInfRequireJson implements IRequireJsPackage {
           final String unversionedWhere = getUnversionedModuleId( moduleIdTranslator, where );
 
           if ( mappedModuleId instanceof String ) {
-            this.addMap( unversionedWhere, originalModuleId, (String) mappedModuleId );
+            this.addMap( unversionedWhere, getUnversionedModuleId( moduleIdTranslator, originalModuleId ), getUnversionedModuleId( moduleIdTranslator, (String) mappedModuleId ) );
           }
         } );
       } );
@@ -330,8 +354,106 @@ public class MetaInfRequireJson implements IRequireJsPackage {
 
         if ( configuration instanceof Map ) {
           this.addShim( unversionedModuleId, (Map<String, ?>) configuration );
+        } else if ( configuration instanceof List ) {
+          HashMap<String, Object> cfg = new HashMap();
+          cfg.put( "deps", configuration );
+          this.addShim( unversionedModuleId, cfg );
         }
+
       } );
+    }
+
+    if ( meta != null && meta.containsKey( "overrides" ) ) {
+      final Map<String, Object> overrides = (Map<String, Object>) meta.getOrDefault( "overrides", Collections.<String, Object>emptyMap() );
+
+      if ( overrides.containsKey( "dependencies" ) ) {
+        final HashMap<String, ?> dependencies = (HashMap<String, ?>) overrides.get( "dependencies" );
+
+        dependencies.forEach( ( dependencyId, versionRequirement ) -> {
+          if ( versionRequirement instanceof String ) {
+            addDependency( dependencyId, (String) versionRequirement );
+          } else {
+            removeDependency( dependencyId );
+          }
+        } );
+      }
+
+      if ( overrides.containsKey( "paths" ) ) {
+        Map<String, ?> paths = (Map<String, ?>) overrides.get( "paths" );
+        paths.forEach( ( moduleId, path ) -> {
+          if ( path instanceof String ) {
+            this.addModule( moduleId, (String) path );
+          } else {
+            this.removeModule( moduleId );
+          }
+        } );
+      }
+
+      if ( overrides.containsKey( "packages" ) ) {
+        List<Object> packages = (List<Object>) overrides.get( "packages" );
+        packages.forEach( packageDefinition -> {
+          if ( packageDefinition instanceof String ) {
+            String packageName = (String) packageDefinition;
+
+            String path = this.modules.getOrDefault( packageName, "/" + packageName );
+
+            path = getUnversionedPath( basePaths, path );
+
+            this.addModule( packageName, path, "main" );
+          } else if ( packageDefinition instanceof HashMap ) {
+            final HashMap<String, String> packageObj = (HashMap<String, String>) packageDefinition;
+
+            if ( packageObj.containsKey( "name" ) ) {
+              String packageName = packageObj.get( "name" );
+              String path = packageObj.getOrDefault( "location", "/" + ( !packageName.equals( name ) ? packageName : "" )  );
+              String mainScript = packageObj.getOrDefault( "main", "main" );
+
+              path = getUnversionedPath( basePaths, path );
+
+              this.addModule( packageName, path, mainScript );
+            }
+          }
+        } );
+      }
+
+      if ( overrides.containsKey( "config" ) ) {
+        Map<String, ?> config = (Map<String, ?>) overrides.get( "config" );
+        config.forEach( ( moduleId, configuration ) -> {
+          if ( configuration instanceof Map ) {
+            this.addConfig( moduleId, (Map<String, ?>) configuration );
+          } else {
+            this.removeConfig( moduleId );
+          }
+        } );
+      }
+
+      if ( overrides.containsKey( "map" ) ) {
+        Map<String, ?> mappings = (Map<String, ?>) overrides.get( "map" );
+        mappings.forEach( ( where, map ) -> {
+          if ( map instanceof Map ) {
+            ( (Map<String, ?>) map ).forEach( ( originalModuleId, mappedModuleId ) -> {
+              if ( mappedModuleId instanceof String ) {
+                this.addMap( where, originalModuleId, (String) mappedModuleId );
+              } else {
+                this.removeMap( where, originalModuleId );
+              }
+            } );
+          } else {
+            this.removeMap( where );
+          }
+        } );
+      }
+
+      if ( overrides.containsKey( "shim" ) ) {
+        Map<String, ?> config = (Map<String, ?>) overrides.get( "shim" );
+        config.forEach( ( originalModuleId, configuration ) -> {
+          if ( configuration instanceof Map ) {
+            this.addShim( originalModuleId, (Map<String, ?>) configuration );
+          } else {
+            this.removeShim( originalModuleId );
+          }
+        } );
+      }
     }
   }
 
@@ -361,23 +483,5 @@ public class MetaInfRequireJson implements IRequireJsPackage {
     }
 
     return moduleId;
-  }
-
-  @Override
-  public void register() {
-    this.serviceReference = this.bundleContext.registerService( IRequireJsPackage.class.getName(), this, null );
-  }
-
-  @Override
-  public void unregister() {
-    if ( this.serviceReference != null ) {
-      try {
-        this.serviceReference.unregister();
-      } catch ( RuntimeException ignored ) {
-        // service might be already unregistered automatically by the bundle lifecycle manager
-      }
-
-      this.serviceReference = null;
-    }
   }
 }

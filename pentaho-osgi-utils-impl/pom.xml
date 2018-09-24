@@ -5,16 +5,16 @@
   <parent>
     <groupId>pentaho</groupId>
     <artifactId>pentaho-osgi-bundles</artifactId>
-    <version>9.0.0.0-SNAPSHOT</version>
+    <version>8.2.0.0-SNAPSHOT</version>
   </parent>
   <groupId>pentaho</groupId>
   <artifactId>pentaho-osgi-utils-impl</artifactId>
-  <version>9.0.0.0-SNAPSHOT</version>
+  <version>8.2.0.0-SNAPSHOT</version>
   <packaging>bundle</packaging>
   <properties>
     <dependency.org.apache.felix.org.apache.felix.configadmin.revision>1.6.0</dependency.org.apache.felix.org.apache.felix.configadmin.revision>
     <felix.version>4.4.1</felix.version>
-    <slf4j-log4j12.version>1.7.7</slf4j-log4j12.version>
+
   </properties>
   <dependencies>
     <dependency>

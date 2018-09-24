@@ -67,6 +67,68 @@ public class RequireJsGenerator {
 
   private static final JSONParser parser = new JSONParser();
 
+  private static final ArrayList<String> JS_KNOWN_GLOBALS;
+
+  static {
+    JS_KNOWN_GLOBALS = new ArrayList<>();
+    JS_KNOWN_GLOBALS.add( "applicationCache" );
+    JS_KNOWN_GLOBALS.add( "caches" );
+    JS_KNOWN_GLOBALS.add( "closed" );
+    JS_KNOWN_GLOBALS.add( "Components" );
+    JS_KNOWN_GLOBALS.add( "console" );
+    JS_KNOWN_GLOBALS.add( "content" );
+    JS_KNOWN_GLOBALS.add( "_content" );
+    JS_KNOWN_GLOBALS.add( "controllers" );
+    JS_KNOWN_GLOBALS.add( "crypto" );
+    JS_KNOWN_GLOBALS.add( "defaultStatus" );
+    JS_KNOWN_GLOBALS.add( "devicePixelRatio" );
+    JS_KNOWN_GLOBALS.add( "dialogArguments" );
+    JS_KNOWN_GLOBALS.add( "directories" );
+    JS_KNOWN_GLOBALS.add( "document" );
+    JS_KNOWN_GLOBALS.add( "frameElement" );
+    JS_KNOWN_GLOBALS.add( "frames" );
+    JS_KNOWN_GLOBALS.add( "fullScreen" );
+    JS_KNOWN_GLOBALS.add( "globalStorage" );
+    JS_KNOWN_GLOBALS.add( "history" );
+    JS_KNOWN_GLOBALS.add( "innerHeight" );
+    JS_KNOWN_GLOBALS.add( "innerWidth" );
+    JS_KNOWN_GLOBALS.add( "length" );
+    JS_KNOWN_GLOBALS.add( "location" );
+    JS_KNOWN_GLOBALS.add( "locationbar" );
+    JS_KNOWN_GLOBALS.add( "localStorage" );
+    JS_KNOWN_GLOBALS.add( "menubar" );
+    JS_KNOWN_GLOBALS.add( "messageManager" );
+    JS_KNOWN_GLOBALS.add( "name" );
+    JS_KNOWN_GLOBALS.add( "navigator" );
+    JS_KNOWN_GLOBALS.add( "opener" );
+    JS_KNOWN_GLOBALS.add( "outerHeight" );
+    JS_KNOWN_GLOBALS.add( "outerWidth" );
+    JS_KNOWN_GLOBALS.add( "pageXOffset" );
+    JS_KNOWN_GLOBALS.add( "pageYOffset" );
+    JS_KNOWN_GLOBALS.add( "sessionStorage" );
+    JS_KNOWN_GLOBALS.add( "parent" );
+    JS_KNOWN_GLOBALS.add( "performance" );
+    JS_KNOWN_GLOBALS.add( "personalbar" );
+    JS_KNOWN_GLOBALS.add( "pkcs11" );
+    JS_KNOWN_GLOBALS.add( "returnValue" );
+    JS_KNOWN_GLOBALS.add( "screen" );
+    JS_KNOWN_GLOBALS.add( "screenX" );
+    JS_KNOWN_GLOBALS.add( "screenY" );
+    JS_KNOWN_GLOBALS.add( "scrollbars" );
+    JS_KNOWN_GLOBALS.add( "scrollMaxX" );
+    JS_KNOWN_GLOBALS.add( "scrollMaxY" );
+    JS_KNOWN_GLOBALS.add( "scrollX" );
+    JS_KNOWN_GLOBALS.add( "scrollY" );
+    JS_KNOWN_GLOBALS.add( "self" );
+    JS_KNOWN_GLOBALS.add( "sessionStorage" );
+    JS_KNOWN_GLOBALS.add( "sidebar" );
+    JS_KNOWN_GLOBALS.add( "status" );
+    JS_KNOWN_GLOBALS.add( "statusbar" );
+    JS_KNOWN_GLOBALS.add( "toolbar" );
+    JS_KNOWN_GLOBALS.add( "top" );
+    JS_KNOWN_GLOBALS.add( "window" );
+  }
+
   public static RequireJsGenerator parsePom( InputStream inputStream ) throws Exception {
     try {
       byte[] bytes = IOUtils.toByteArray( inputStream );
@@ -92,14 +154,8 @@ public class RequireJsGenerator {
   }
 
   public static RequireJsGenerator parseJsonPackage( InputStream inputStream ) {
-    InputStreamReader inputStreamReader = null;
-    BufferedReader bufferedReader = null;
-
     try {
-      inputStreamReader = new InputStreamReader( inputStream );
-      bufferedReader = new BufferedReader( inputStreamReader );
-
-      Map<String, Object> json = (Map<String, Object>) parser.parse( bufferedReader );
+      Map<String, Object> json = parseJson( inputStream );
       return new RequireJsGenerator( json );
     } catch ( Exception ignored ) {
       // ignored
@@ -125,6 +181,66 @@ public class RequireJsGenerator {
     } catch ( Exception e ) {
       throw new Exception( "Error reading JS script", e );
     }
+  }
+
+  public static Map<String, Object> getPackageOverrides( String group, String artifactId, String version ) {
+    URL overridesUrl = RequireJsGenerator.class.getResource( "/overrides/" + group + "/" + artifactId + "/" + version + "/overrides.json" );
+
+    Map<String, Object> overrides = null;
+    if ( overridesUrl != null ) {
+      try {
+        overrides = RequireJsGenerator.parseJson( overridesUrl.openStream() );
+      } catch ( IOException | ParseException ignored ) {
+      }
+    }
+
+    return overrides;
+  }
+
+  public static boolean findAmdDefine( InputStream is, ArrayList<String> exports ) {
+    final Pattern definePattern =
+        Pattern.compile( "\bdefine\b(\\s*)\\(((\\s*)\"[^\"]+\"(\\s*),)?((\\s*)\\[((\\s*)\"[^\"]+\""
+            + "(\\s*),?)+(\\s*)\\](\\s*),)?((\\s*)function)" );
+
+    final Pattern globalPattern =
+        Pattern.compile(
+            "(\\bwindow\\b|\\bexports\\b)\\.(([a-zA-Z_$][a-zA-Z\\d_$]*\\.)*[a-zA-Z_$][a-zA-Z\\d_$]*)"
+                + "\\s*=\\s*[\\w${][^,;]+" );
+
+    BufferedReader br = new BufferedReader( new InputStreamReader( is ) );
+
+    String line;
+    try {
+      while ( ( line = br.readLine() ) != null ) {
+        Matcher matcher = definePattern.matcher( line );
+        if ( matcher.find() ) {
+          return true;
+        }
+
+        matcher = globalPattern.matcher( line );
+        if ( matcher.find() ) {
+          final String var = matcher.group( 2 );
+          final String varSegment = var.split( "\\.", 2 )[ 0 ];
+          if ( !varSegment.startsWith( "on" ) && !JS_KNOWN_GLOBALS.contains( varSegment ) && !exports
+              .contains( var ) ) {
+            exports.add( var );
+          }
+        }
+      }
+    } catch ( IOException ignored ) {
+      // ignored
+    }
+
+    return false;
+  }
+
+  private static Map<String, Object> parseJson( InputStream inputStream ) throws IOException, ParseException {
+    InputStreamReader inputStreamReader;
+    BufferedReader bufferedReader;
+    inputStreamReader = new InputStreamReader( inputStream );
+    bufferedReader = new BufferedReader( inputStreamReader );
+
+    return (Map<String, Object>) parser.parse( bufferedReader );
   }
 
   private RequireJsGenerator( Document pom ) throws XPathExpressionException, ParseException {
@@ -154,13 +270,11 @@ public class RequireJsGenerator {
     return this.moduleInfo;
   }
 
-  public ModuleInfo getConvertedConfig( ArtifactInfo artifactInfo ) {
-    return this.getConvertedConfig( artifactInfo, true, null );
-  }
-
-  public ModuleInfo getConvertedConfig( ArtifactInfo artifactInfo, boolean isAmdPackage, String exports ) {
-    moduleInfo.setAmdPackage( isAmdPackage );
-    moduleInfo.setExports( exports );
+  public ModuleInfo getConvertedConfig( ArtifactInfo artifactInfo, boolean isAmdPackage, String exports, Map<String, Object> overrides ) {
+    if ( overrides == null ) {
+      moduleInfo.setAmdPackage( isAmdPackage );
+      moduleInfo.setExports( exports );
+    }
 
     final HashMap<String, String> artifactModules = new HashMap<>();
 
@@ -175,6 +289,9 @@ public class RequireJsGenerator {
     HashMap<String, Object> meta = new HashMap<>();
     meta.put( "modules", moduleInfo.getModules() );
     meta.put( "artifacts", artifacts );
+    if ( overrides != null ) {
+      meta.put( "overrides", overrides );
+    }
 
     convertedConfig.put( "requirejs-osgi-meta", meta );
 
@@ -244,6 +361,8 @@ public class RequireJsGenerator {
     m.appendTail( sb );
 
     jsScript = sb.toString();
+
+    sb = new StringBuffer();
 
     pat = Pattern.compile( "webjars\\.path\\(['\"]{1}(.*)['\"]{1}, (['\"]{0,1}[^\\)]+['\"]{0,1})\\)" );
     m = pat.matcher( jsScript );
@@ -537,44 +656,10 @@ public class RequireJsGenerator {
 
     final HashMap<String, ?> config = (HashMap<String, ?>) requireConfig.get( "config" );
     if ( config != null ) {
-      requirejs.put( "config", convertTypeAndInstanceConfigurations( config ) );
+      requirejs.put( "config", convertSubConfig( keyMap, config ) );
     }
 
     return requirejs;
-  }
-
-  private HashMap<String, ?> convertTypeAndInstanceConfigurations( HashMap<String, ?> config ) {
-    HashMap<String, Object> convertedConfig = new HashMap<>();
-
-    if ( config != null ) {
-      for ( String key : config.keySet() ) {
-        if ( key.equals( "pentaho/typeInfo" ) || key.equals( "pentaho/instanceInfo" ) || key.equals( "pentaho/service" ) ) {
-          final HashMap<String, ?> serviceConfig = (HashMap<String, ?>) config.get( key );
-
-          if ( serviceConfig != null ) {
-            HashMap<String, Object> convertedServiceConfig = new HashMap<>();
-
-            for ( String serviceKey : serviceConfig.keySet() ) {
-              String convertedServiceKey = serviceKey;
-
-              if ( !serviceKey.startsWith( moduleInfo.getVersionedName() ) && serviceKey.startsWith( moduleInfo.getName() ) ) {
-                convertedServiceKey = StringUtils.replaceOnce( serviceKey, moduleInfo.getName(), moduleInfo.getVersionedName() );
-              } else if ( serviceKey.startsWith( "./" ) ) {
-                convertedServiceKey = moduleInfo.getVersionedName() + serviceKey.substring( 1 );
-              }
-
-              convertedServiceConfig.put( convertedServiceKey, serviceConfig.get( serviceKey ) );
-            }
-
-            convertedConfig.put( key, convertedServiceConfig );
-          }
-        } else {
-          convertedConfig.put( key, config.get( key ) );
-        }
-      }
-    }
-
-    return convertedConfig;
   }
 
   private HashMap<String, ?> convertSubConfig( HashMap<String, String> keyMap,
